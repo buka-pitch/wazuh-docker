@@ -1,10 +1,8 @@
-WAZUH_IMAGE_VERSION=main
-IMAGE_TAG=main
+WAZUH_IMAGE_VERSION=4.14.0
 WAZUH_VERSION=$(echo $WAZUH_IMAGE_VERSION | sed -e 's/\.//g')
 WAZUH_TAG_REVISION=1
 WAZUH_CURRENT_VERSION=$(curl --silent https://api.github.com/repos/wazuh/wazuh/releases/latest | grep '["]tag_name["]:' | sed -E 's/.*\"([^\"]+)\".*/\1/' | cut -c 2- | sed -e 's/\.//g')
 IMAGE_VERSION=${WAZUH_IMAGE_VERSION}
-WAZUH_REGISTRY=docker.io
 
 # Wazuh package generator
 # Copyright (C) 2023, Wazuh Inc.
@@ -14,10 +12,10 @@ WAZUH_REGISTRY=docker.io
 # License (version 2) as published by the FSF - Free Software
 # Foundation.
 
-WAZUH_IMAGE_VERSION="main"
+WAZUH_IMAGE_VERSION="4.14.0"
 WAZUH_TAG_REVISION="1"
 WAZUH_DEV_STAGE=""
-WAZUH_TAG_REFERENCE=""
+FILEBEAT_MODULE_VERSION="0.4"
 
 # -----------------------------------------------------------------------------
 
@@ -39,44 +37,36 @@ ctrl_c() {
 build() {
 
     WAZUH_VERSION="$(echo $WAZUH_IMAGE_VERSION | sed -e 's/\.//g')"
-    WAZUH_MINOR_VERSION="${WAZUH_IMAGE_VERSION%.*}"
+    FILEBEAT_TEMPLATE_BRANCH="${WAZUH_IMAGE_VERSION}"
+    WAZUH_FILEBEAT_MODULE="wazuh-filebeat-${FILEBEAT_MODULE_VERSION}.tar.gz"
     WAZUH_UI_REVISION="${WAZUH_TAG_REVISION}"
 
-    # Variables
-    FILE="packages_url.txt"
-
-    if [[ -f "$FILE" ]]; then
-        echo "$FILE exists. Using existing file."
+    if  [ "${WAZUH_DEV_STAGE}" ];then
+        FILEBEAT_TEMPLATE_BRANCH="v${FILEBEAT_TEMPLATE_BRANCH}-${WAZUH_DEV_STAGE,,}"
+        if ! curl --output /dev/null --silent --head --fail "https://github.com/wazuh/wazuh/tree/${FILEBEAT_TEMPLATE_BRANCH}"; then
+            echo "The indicated branch does not exist in the wazuh/wazuh repository: ${FILEBEAT_TEMPLATE_BRANCH}"
+            clean 1
+        fi
     else
-        TAG="v${WAZUH_VERSION}"
-        REPO="wazuh/wazuh-docker"
-        GH_URL="https://api.github.com/repos/${REPO}/git/refs/tags/${TAG}"
-
-        if curl -fsSL "$GH_URL" >/dev/null 2>&1; then
-            curl -fsSL -o "$FILE" "https://packages.wazuh.com/${WAZUH_MINOR_VERSION}/packages_url.txt"
+        if curl --output /dev/null --silent --head --fail "https://github.com/wazuh/wazuh/tree/v${FILEBEAT_TEMPLATE_BRANCH}"; then
+            FILEBEAT_TEMPLATE_BRANCH="v${FILEBEAT_TEMPLATE_BRANCH}"
+        elif curl --output /dev/null --silent --head --fail "https://github.com/wazuh/wazuh/tree/${FILEBEAT_TEMPLATE_BRANCH}"; then
+            FILEBEAT_TEMPLATE_BRANCH="${FILEBEAT_TEMPLATE_BRANCH}"
         else
-            curl -fsSL -o "$FILE" "https://packages-dev.wazuh.com/${WAZUH_MINOR_VERSION}/packages_url.txt"
+            echo "The indicated branch does not exist in the wazuh/wazuh repository: ${FILEBEAT_TEMPLATE_BRANCH}"
+            clean 1
         fi
     fi
-    awk -F':' '{name=$1; val=substr($0,length(name)+3); gsub(/[-.]/,"_",name); print name "=" val}' $FILE > packages_env.txt
-    
-    echo WAZUH_VERSION=$WAZUH_IMAGE_VERSION > ../.env
-    echo WAZUH_IMAGE_VERSION=$WAZUH_IMAGE_VERSION >> ../.env
-    echo WAZUH_TAG_REVISION=$WAZUH_TAG_REVISION >> ../.env
-    echo WAZUH_UI_REVISION=$WAZUH_UI_REVISION >> ../.env
-    echo WAZUH_REGISTRY=$WAZUH_REGISTRY >> ../.env
-    echo IMAGE_TAG=$IMAGE_TAG >> ../.env
 
-    set -a
-    source ../.env
-    source ./packages_env.txt
-    set +a
+    echo WAZUH_VERSION=$WAZUH_IMAGE_VERSION > .env
+    echo WAZUH_IMAGE_VERSION=$WAZUH_IMAGE_VERSION >> .env
+    echo WAZUH_TAG_REVISION=$WAZUH_TAG_REVISION >> .env
+    echo FILEBEAT_TEMPLATE_BRANCH=$FILEBEAT_TEMPLATE_BRANCH >> .env
+    echo WAZUH_FILEBEAT_MODULE=$WAZUH_FILEBEAT_MODULE >> .env
+    echo WAZUH_UI_REVISION=$WAZUH_UI_REVISION >> .env
 
-    if  [ "${MULTIARCH}" ];then
-        docker buildx bake --file build-images.yml --push --set *.platform=linux/amd64,linux/arm64 --no-cache|| clean 1
-    else
-        docker buildx bake --file build-images.yml --no-cache|| clean 1
-    fi
+    docker compose -f build-docker-images/build-images.yml --env-file .env build --no-cache || clean 1
+
     return 0
 }
 
@@ -87,11 +77,9 @@ help() {
     echo "Usage: $0 [OPTIONS]"
     echo
     echo "    -d, --dev <ref>              [Optional] Set the development stage you want to build, example rc2 or beta1, not used by default."
+    echo "    -f, --filebeat-module <ref>  [Optional] Set Filebeat module version. By default ${FILEBEAT_MODULE_VERSION}."
     echo "    -r, --revision <rev>         [Optional] Package revision. By default ${WAZUH_TAG_REVISION}"
-    echo "    -ref, --reference <ref>      [Optional] Set the Wazuh reference to build development images. By default, the latest stable release."
-    echo "    -rg, --registry <reg>        [Optional] Set the Docker registry to push the images."
     echo "    -v, --version <ver>          [Optional] Set the Wazuh version should be builded. By default, ${WAZUH_IMAGE_VERSION}."
-    echo "    -m, --multiarch              [Optional] Enable multi-architecture builds."
     echo "    -h, --help                   Show this help."
     echo
     exit $1
@@ -114,29 +102,17 @@ main() {
                 help 1
             fi
             ;;
-        "-m"|"--multiarch")
-            MULTIARCH="true"
-                shift
+        "-f"|"--filebeat-module")
+            if [ -n "${2}" ]; then
+                FILEBEAT_MODULE_VERSION="${2}"
+                shift 2
+            else
+                help 1
+            fi
             ;;
         "-r"|"--revision")
             if [ -n "${2}" ]; then
                 WAZUH_TAG_REVISION="${2}"
-                shift 2
-            else
-                help 1
-            fi
-            ;;
-        "-ref"|"--reference")
-            if [ -n "${2}" ]; then
-                WAZUH_TAG_REFERENCE="${2}"
-                shift 2
-            else
-                help 1
-            fi
-            ;;
-        "-rg"|"--registry")
-            if [ -n "${2}" ]; then
-                WAZUH_REGISTRY="${2}"
                 shift 2
             else
                 help 1
