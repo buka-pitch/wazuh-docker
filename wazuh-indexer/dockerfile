@@ -1,0 +1,54 @@
+# Dockerfile.wazuh-indexer-compatible
+FROM ubuntu:20.04 as builder
+
+# Install build tools
+RUN apt-get update && apt-get install -y \
+    openjdk-11-jdk \
+    maven \
+    git \
+    wget \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set Java compatibility
+ENV JAVA_OPTS="-XX:+UseG1GC -XX:MaxRAMPercentage=75"
+
+# Clone OpenSearch (Wazuh Indexer is based on OpenSearch)
+WORKDIR /tmp
+RUN git clone https://github.com/opensearch-project/OpenSearch.git
+WORKDIR /tmp/OpenSearch
+RUN git checkout 2.11.0  # Compatible version
+
+# Build with compatibility
+RUN ./gradlew assemble -Dopensearch.bundle=true
+
+# Runtime stage
+FROM ubuntu:20.04
+
+# Install Java runtime
+RUN apt-get update && apt-get install -y \
+    openjdk-11-jre-headless \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy built OpenSearch
+COPY --from=builder /tmp/OpenSearch/build/distributions/opensearch-*.tar.gz /tmp/
+RUN tar -xzf /tmp/opensearch-*.tar.gz -C /usr/share/ && \
+    mv /usr/share/opensearch-* /usr/share/wazuh-indexer && \
+    rm /tmp/opensearch-*.tar.gz
+
+# Create user and directories
+RUN groupadd -r wazuh && useradd -r -g wazuh wazuh
+RUN mkdir -p /var/lib/wazuh-indexer && \
+    chown -R wazuh:wazuh /usr/share/wazuh-indexer /var/lib/wazuh-indexer
+
+# Expose port
+EXPOSE 9200 9600
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5m --retries=3 \
+    CMD curl -f http://localhost:9200/_cluster/health || exit 1
+
+# Start OpenSearch
+USER wazuh
+CMD ["/usr/share/wazuh-indexer/bin/opensearch"]

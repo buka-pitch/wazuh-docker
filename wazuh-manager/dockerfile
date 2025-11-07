@@ -1,0 +1,70 @@
+# Dockerfile.wazuh-manager-compatible
+FROM ubuntu:20.04 as builder
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    gcc \
+    g++ \
+    make \
+    autoconf \
+    automake \
+    libtool \
+    libssl-dev \
+    libpcre2-dev \
+    libyaml-dev \
+    libjansson-dev \
+    libevent-dev \
+    python3 \
+    python3-pip \
+    git \
+    wget \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set compatibility flags for older CPUs
+ENV CFLAGS="-march=x86-64 -mtune=generic -O2"
+ENV CXXFLAGS="-march=x86-64 -mtune=generic -O2"
+ENV LDFLAGS="-Wl,-rpath,/usr/local/lib"
+
+# Clone Wazuh source
+WORKDIR /tmp
+RUN git clone https://github.com/wazuh/wazuh.git
+WORKDIR /tmp/wazuh
+RUN git checkout v4.14.0  # Latest version
+
+# Build Wazuh manager
+RUN ./install.sh
+
+# Runtime stage
+FROM ubuntu:20.04
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    libssl1.1 \
+    libpcre2-8-0 \
+    libyaml-0-2 \
+    libjansson4 \
+    libevent-2.1-7 \
+    python3 \
+    python3-pip \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy built binaries
+COPY --from=builder /var/ossec /var/ossec
+
+# Create necessary users and directories
+RUN groupadd -r wazuh && useradd -r -g wazuh wazuh
+RUN chown -R wazuh:wazuh /var/ossec
+
+# Expose ports
+EXPOSE 1514 1515 1516 514/udp 55000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5m --retries=3 \
+    CMD /var/ossec/bin/wazuh-control status || exit 1
+
+# Start Wazuh
+CMD ["/var/ossec/bin/wazuh-control", "start"]
